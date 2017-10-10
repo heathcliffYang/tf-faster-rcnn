@@ -73,6 +73,8 @@ class coco(imdb):
     Load image ids.
     """
     image_ids = self._COCO.getImgIds()
+    print("image_total_indices")
+    print(len(image_ids))
     return image_ids
 
   def _get_widths(self):
@@ -84,6 +86,8 @@ class coco(imdb):
     """
     Return the absolute path to image i in the image sequence.
     """
+    print("image_index:")
+    print(self._image_index[i])
     return self.image_path_from_index(self._image_index[i])
 
   def image_path_from_index(self, index):
@@ -105,19 +109,35 @@ class coco(imdb):
     Return the database of ground-truth regions of interest.
     This function loads/saves from/to a cache file to speed up future calls.
     """
-    cache_file = osp.join(self.cache_path, self.name + '_gt_roidb.pkl')
-    if osp.exists(cache_file):
-      with open(cache_file, 'rb') as fid:
-        roidb = pickle.load(fid)
-      print('{} gt roidb loaded from {}'.format(self.name, cache_file))
-      return roidb
+#    cache_file = osp.join(self.cache_path, self.name + '_gt_roidb.pkl')
+#    if osp.exists(cache_file):
+#      with open(cache_file, 'rb') as fid:
+#        roidb = pickle.load(fid)
+#      print('{} gt roidb loaded from {}'.format(self.name, cache_file))
+#      return roidb
 
-    gt_roidb = [self._load_coco_annotation(index)
-                for index in self._image_index]
+# TODO: too many data to be loaded!!
+#    gt_roidb = [self._load_coco_annotation(index)
+#                for index in self._image_index]
+    gt_roidb = self._load_coco_annotation(index = self._image_index[0])
 
-    with open(cache_file, 'wb') as fid:
-      pickle.dump(gt_roidb, fid, pickle.HIGHEST_PROTOCOL)
-    print('wrote gt roidb to {}'.format(cache_file))
+#    with open(cache_file, 'wb') as fid:
+#      pickle.dump(gt_roidb, fid, pickle.HIGHEST_PROTOCOL)
+#    print('wrote gt roidb to {}'.format(cache_file))
+    return gt_roidb
+
+  def get_next_roidb(self):
+#    cache_file = osp.join(self.cache_path, self.name + '_gt_roidb.pkl')
+    if imdb.roidb_index(self) >= len(self._image_index):
+      imdb.set_roidb_index(self, roidb_index = 0)
+    gt_roidb = self._load_coco_annotation(index = self._image_index[imdb.roidb_index(self)])
+    print("image_index of roidb:")
+    print(self._image_index[imdb.roidb_index(self)])
+#    imdb.next_roidb_index(self)
+
+#    with open(cache_file, 'wb') as fid:
+#      pickle.dump(gt_roidb, fid, pickle.HIGHEST_PROTOCOL)
+#    print('wrote gt roidb to {}'.format(cache_file))
     return gt_roidb
 
   def _load_coco_annotation(self, index):
@@ -132,6 +152,7 @@ class coco(imdb):
 
     annIds = self._COCO.getAnnIds(imgIds=index, iscrowd=None)
     objs = self._COCO.loadAnns(annIds)
+
     # Sanitize bboxes -- some are invalid
     valid_objs = []
     for obj in objs:
@@ -142,6 +163,7 @@ class coco(imdb):
       if obj['area'] > 0 and x2 >= x1 and y2 >= y1:
         obj['clean_bbox'] = [x1, y1, x2, y2]
         valid_objs.append(obj)
+
     objs = valid_objs
     num_objs = len(objs)
 
@@ -149,6 +171,10 @@ class coco(imdb):
     gt_classes = np.zeros((num_objs), dtype=np.int32)
     overlaps = np.zeros((num_objs, self.num_classes), dtype=np.float32)
     seg_areas = np.zeros((num_objs), dtype=np.float32)
+    # Mask
+    masks = np.zeros((num_objs, height, width), dtype=np.float32)
+    mask = np.zeros((height, width), dtype=np.float32)
+    # Mask
 
     # Lookup table to map from COCO category ids to our internal class
     # indices
@@ -161,6 +187,17 @@ class coco(imdb):
       boxes[ix, :] = obj['clean_bbox']
       gt_classes[ix] = cls
       seg_areas[ix] = obj['area']
+      # Mask
+      m = self._COCO.annToMask(obj)
+      assert m.shape[0] == height and m.shape[1] == width, \
+            'image %s and ann %s dont match' % (img_id, ann)
+      #masks.append(m)
+      masks[ix,:] = m
+      ### Don't know why yet
+#      m = m.astype(np.float32) * cls
+#      mask[m > 0] = m[m > 0]
+      ### Don't know why yet
+      # Mask
       if obj['iscrowd']:
         # Set overlap to -1 for all classes for crowd objects
         # so they will be excluded during training
@@ -173,6 +210,9 @@ class coco(imdb):
     return {'width': width,
             'height': height,
             'boxes': boxes,
+            # Mask
+            'masks': masks,
+            # Mask
             'gt_classes': gt_classes,
             'gt_overlaps': overlaps,
             'flipped': False,
@@ -191,9 +231,16 @@ class coco(imdb):
       boxes[:, 0] = widths[i] - oldx2 - 1
       boxes[:, 2] = widths[i] - oldx1 - 1
       assert (boxes[:, 2] >= boxes[:, 0]).all()
+      # Mask - Flip mask!!!
+      masks = self.roidb[i]['masks'].copy()
+      masks = masks[:,:,::-1]
+      # Mask - Flip mask!!!
       entry = {'width': widths[i],
                'height': self.roidb[i]['height'],
                'boxes': boxes,
+               # Mask
+               'masks': masks,
+               # Mask
                'gt_classes': self.roidb[i]['gt_classes'],
                'gt_overlaps': self.roidb[i]['gt_overlaps'],
                'flipped': True,

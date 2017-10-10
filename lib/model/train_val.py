@@ -29,11 +29,13 @@ class SolverWrapper(object):
     A wrapper class for the training process
   """
 
-  def __init__(self, sess, network, imdb, roidb, valroidb, output_dir, tbdir, pretrained_model=None):
+#  def __init__(self, sess, network, imdb, roidb, valroidb, output_dir, tbdir, pretrained_model=None):
+  def __init__(self, sess, network, imdb, imdbval, output_dir, tbdir, pretrained_model=None):
     self.net = network
     self.imdb = imdb
-    self.roidb = roidb
-    self.valroidb = valroidb
+    self.imdbval = imdbval
+#    self.roidb = roidb
+#    self.valroidb = valroidb
     self.output_dir = output_dir
     self.tbdir = tbdir
     # Simply put '_val' at the end to save the summaries from the validation set
@@ -42,6 +44,7 @@ class SolverWrapper(object):
       os.makedirs(self.tbvaldir)
     self.pretrained_model = pretrained_model
 
+#TODO delete nfile element
   def snapshot(self, sess, iter):
     net = self.net
 
@@ -53,10 +56,11 @@ class SolverWrapper(object):
     filename = os.path.join(self.output_dir, filename)
     self.saver.save(sess, filename)
     print('Wrote snapshot to: {:s}'.format(filename))
-
+    
     # Also store some meta information, random state, etc.
     nfilename = cfg.TRAIN.SNAPSHOT_PREFIX + '_iter_{:d}'.format(iter) + '.pkl'
     nfilename = os.path.join(self.output_dir, nfilename)
+    """
     # current state of numpy random
     st0 = np.random.get_state()
     # current position in the database
@@ -67,18 +71,26 @@ class SolverWrapper(object):
     cur_val = self.data_layer_val._cur
     # current shuffled indexes of the validation database
     perm_val = self.data_layer_val._perm
+    """
+    roidb_ind = self.data_layer._imdb.roidb_index()
+    roidb_val_ind = self.data_layer_val._imdb.roidb_index()
 
     # Dump the meta info
     with open(nfilename, 'wb') as fid:
+      """
       pickle.dump(st0, fid, pickle.HIGHEST_PROTOCOL)
       pickle.dump(cur, fid, pickle.HIGHEST_PROTOCOL)
       pickle.dump(perm, fid, pickle.HIGHEST_PROTOCOL)
       pickle.dump(cur_val, fid, pickle.HIGHEST_PROTOCOL)
       pickle.dump(perm_val, fid, pickle.HIGHEST_PROTOCOL)
+      """
       pickle.dump(iter, fid, pickle.HIGHEST_PROTOCOL)
+      pickle.dump(roidb_ind, fid, pickle.HIGHEST_PROTOCOL)
+      pickle.dump(roidb_val_ind, fid, pickle.HIGHEST_PROTOCOL)
 
     return filename, nfilename
 
+#TODO delete nfile element
   def from_snapshot(self, sess, sfile, nfile):
     print('Restoring model snapshots from {:s}'.format(sfile))
     self.saver.restore(sess, sfile)
@@ -86,20 +98,29 @@ class SolverWrapper(object):
     # Needs to restore the other hyper-parameters/states for training, (TODO xinlei) I have
     # tried my best to find the random states so that it can be recovered exactly
     # However the Tensorflow state is currently not available
+    
     with open(nfile, 'rb') as fid:
+      """
       st0 = pickle.load(fid)
       cur = pickle.load(fid)
       perm = pickle.load(fid)
       cur_val = pickle.load(fid)
       perm_val = pickle.load(fid)
+      """
       last_snapshot_iter = pickle.load(fid)
-
+      roidb_ind = pickle.load(fid)
+      roidb_val_ind = pickle.load(fid)
+      
+      self.data_layer._imdb.set_roidb_index(roidb_ind)
+      self.data_layer_val._imdb.set_roidb_index(roidb_val_ind)
+      
+      """
       np.random.set_state(st0)
       self.data_layer._cur = cur
       self.data_layer._perm = perm
       self.data_layer_val._cur = cur_val
       self.data_layer_val._perm = perm_val
-
+      """
     return last_snapshot_iter
 
   def get_variables_in_checkpoint_file(self, file_name):
@@ -240,9 +261,14 @@ class SolverWrapper(object):
       ss_paths.remove(sfile)
 
   def train_model(self, sess, max_iters):
+    roidb = self.imdb.roidb
+    roidbval = self.imdbval.roidb
+# TODO
     # Build data layers for both training and validation set
-    self.data_layer = RoIDataLayer(self.roidb, self.imdb.num_classes)
-    self.data_layer_val = RoIDataLayer(self.valroidb, self.imdb.num_classes, random=True)
+#    self.data_layer = RoIDataLayer(self.roidb, self.imdb.num_classes)
+#    self.data_layer_val = RoIDataLayer(self.valroidb, self.imdb.num_classes, random=True)
+    self.data_layer = RoIDataLayer(self.imdb, self.imdb.num_classes)
+    self.data_layer_val = RoIDataLayer(self.imdbval, self.imdb.num_classes)
 
     # Construct the computation graph
     lr, train_op = self.construct_graph(sess)
@@ -257,8 +283,10 @@ class SolverWrapper(object):
       rate, last_snapshot_iter, stepsizes, np_paths, ss_paths = self.restore(sess, 
                                                                             str(sfiles[-1]), 
                                                                             str(nfiles[-1]))
+      
     timer = Timer()
     iter = last_snapshot_iter + 1
+    
     last_summary_time = time.time()
     # Make sure the lists are not empty
     stepsizes.append(max_iters)
@@ -280,25 +308,26 @@ class SolverWrapper(object):
       now = time.time()
       if iter == 1 or now - last_summary_time > cfg.TRAIN.SUMMARY_INTERVAL:
         # Compute the graph with summary
-        rpn_loss_cls, rpn_loss_box, loss_cls, loss_box, total_loss, summary = \
+        rpn_loss_cls, rpn_loss_box, loss_cls, loss_box, mask_loss, total_loss, summary = \
           self.net.train_step_with_summary(sess, blobs, train_op)
         self.writer.add_summary(summary, float(iter))
         # Also check the summary on the validation set
+        print('Validation -----------------------------------------------------------------------------------------------------------------------------')
         blobs_val = self.data_layer_val.forward()
         summary_val = self.net.get_summary(sess, blobs_val)
         self.valwriter.add_summary(summary_val, float(iter))
         last_summary_time = now
       else:
         # Compute the graph without summary
-        rpn_loss_cls, rpn_loss_box, loss_cls, loss_box, total_loss = \
+        rpn_loss_cls, rpn_loss_box, loss_cls, loss_box, mask_loss, total_loss = \
           self.net.train_step(sess, blobs, train_op)
       timer.toc()
 
       # Display training information
       if iter % (cfg.TRAIN.DISPLAY) == 0:
         print('iter: %d / %d, total loss: %.6f\n >>> rpn_loss_cls: %.6f\n '
-              '>>> rpn_loss_box: %.6f\n >>> loss_cls: %.6f\n >>> loss_box: %.6f\n >>> lr: %f' % \
-              (iter, max_iters, total_loss, rpn_loss_cls, rpn_loss_box, loss_cls, loss_box, lr.eval()))
+              '>>> rpn_loss_box: %.6f\n >>> loss_cls: %.6f\n >>> loss_box: %.6f\n >>> mask_loss: %.6f\n >>> lr: %f' % \
+              (iter, max_iters, total_loss, rpn_loss_cls, rpn_loss_box, loss_cls, loss_box, mask_loss, lr.eval()))
         print('speed: {:.3f}s / iter'.format(timer.average_time))
 
       # Snapshotting
@@ -320,58 +349,24 @@ class SolverWrapper(object):
     self.writer.close()
     self.valwriter.close()
 
-
-def get_training_roidb(imdb):
-  """Returns a roidb (Region of Interest database) for use in training."""
-  if cfg.TRAIN.USE_FLIPPED:
-    print('Appending horizontally-flipped training examples...')
-    imdb.append_flipped_images()
-    print('done')
-
-  print('Preparing training data...')
-  rdl_roidb.prepare_roidb(imdb)
-  print('done')
-
-  return imdb.roidb
-
-
-def filter_roidb(roidb):
-  """Remove roidb entries that have no usable RoIs."""
-
-  def is_valid(entry):
-    # Valid images have:
-    #   (1) At least one foreground RoI OR
-    #   (2) At least one background RoI
-    overlaps = entry['max_overlaps']
-    # find boxes with sufficient overlap
-    fg_inds = np.where(overlaps >= cfg.TRAIN.FG_THRESH)[0]
-    # Select background RoIs as those within [BG_THRESH_LO, BG_THRESH_HI)
-    bg_inds = np.where((overlaps < cfg.TRAIN.BG_THRESH_HI) &
-                       (overlaps >= cfg.TRAIN.BG_THRESH_LO))[0]
-    # image is only valid if such boxes exist
-    valid = len(fg_inds) > 0 or len(bg_inds) > 0
-    return valid
-
-  num = len(roidb)
-  filtered_roidb = [entry for entry in roidb if is_valid(entry)]
-  num_after = len(filtered_roidb)
-  print('Filtered {} roidb entries: {} -> {}'.format(num - num_after,
-                                                     num, num_after))
-  return filtered_roidb
-
-
-def train_net(network, imdb, roidb, valroidb, output_dir, tb_dir,
+# TODO
+#def train_net(network, imdb, roidb, valroidb, output_dir, tb_dir,
+def train_net(network, imdb, imdbval, output_dir, tb_dir,
               pretrained_model=None,
               max_iters=40000):
   """Train a Faster R-CNN network."""
-  roidb = filter_roidb(roidb)
-  valroidb = filter_roidb(valroidb)
-
+#  roidb = filter_roidb(roidb)
+#  valroidb = filter_roidb(valroidb)
+  """
+  gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.7)
+  tfconfig = tf.ConfigProto(gpu_options=gpu_options, allow_soft_placement=True, log_device_placement=True)
+  tfconfig.gpu_options.allow_growth = True
+  """
   tfconfig = tf.ConfigProto(allow_soft_placement=True)
   tfconfig.gpu_options.allow_growth = True
-
+  
   with tf.Session(config=tfconfig) as sess:
-    sw = SolverWrapper(sess, network, imdb, roidb, valroidb, output_dir, tb_dir,
+    sw = SolverWrapper(sess, network, imdb, imdbval, output_dir, tb_dir,
                        pretrained_model=pretrained_model)
     print('Solving...')
     sw.train_model(sess, max_iters)

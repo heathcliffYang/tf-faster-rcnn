@@ -8,7 +8,7 @@ from __future__ import division
 from __future__ import print_function
 
 import _init_paths
-from model.train_val import get_training_roidb, train_net
+from model.train_val import train_net
 from model.config import cfg, cfg_from_file, cfg_from_list, get_output_dir, get_output_tb_dir
 from datasets.factory import get_imdb
 import datasets.imdb
@@ -70,19 +70,21 @@ def combined_roidb(imdb_names):
     print('Loaded dataset `{:s}` for training'.format(imdb.name))
     imdb.set_proposal_method(cfg.TRAIN.PROPOSAL_METHOD)
     print('Set proposal method: {:s}'.format(cfg.TRAIN.PROPOSAL_METHOD))
-    roidb = get_training_roidb(imdb)
-    return roidb
+#    roidb = get_training_roidb(imdb)
+    return 0
 
   roidbs = [get_roidb(s) for s in imdb_names.split('+')]
-  roidb = roidbs[0]
+#  roidb = roidbs[0]
   if len(roidbs) > 1:
-    for r in roidbs[1:]:
-      roidb.extend(r)
+#    for r in roidbs[1:]:
+#      roidb.extend(r)
     tmp = get_imdb(imdb_names.split('+')[1])
     imdb = datasets.imdb.imdb(imdb_names, tmp.classes)
   else:
     imdb = get_imdb(imdb_names)
-  return imdb, roidb
+
+#  return imdb, roidb
+  return imdb
 
 
 if __name__ == '__main__':
@@ -100,10 +102,13 @@ if __name__ == '__main__':
   pprint.pprint(cfg)
 
   np.random.seed(cfg.RNG_SEED)
-
+#TODO
+  """
   # train set
   imdb, roidb = combined_roidb(args.imdb_name)
   print('{:d} roidb entries'.format(len(roidb)))
+  """
+  imdb = combined_roidb(args.imdb_name)
 
   # output directory where the models are saved
   output_dir = get_output_dir(imdb, args.tag)
@@ -116,8 +121,8 @@ if __name__ == '__main__':
   # also add the validation set, but with no flipping images
   orgflip = cfg.TRAIN.USE_FLIPPED
   cfg.TRAIN.USE_FLIPPED = False
-  _, valroidb = combined_roidb(args.imdbval_name)
-  print('{:d} validation roidb entries'.format(len(valroidb)))
+  imdbval = combined_roidb(args.imdbval_name)
+#  print('{:d} validation roidb entries'.format(len(valroidb)))
   cfg.TRAIN.USE_FLIPPED = orgflip
 
   # load network
@@ -133,7 +138,8 @@ if __name__ == '__main__':
     net = mobilenetv1()
   else:
     raise NotImplementedError
-    
-  train_net(net, imdb, roidb, valroidb, output_dir, tb_dir,
+# TODO   
+#  train_net(net, imdb, roidb, valroidb, output_dir, tb_dir,
+  train_net(net, imdb, imdbval, output_dir, tb_dir,
             pretrained_model=args.weight,
             max_iters=args.max_iters)

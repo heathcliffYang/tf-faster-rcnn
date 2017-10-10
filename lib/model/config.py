@@ -34,6 +34,7 @@ __C.TRAIN.GAMMA = 0.1
 __C.TRAIN.STEPSIZE = [30000]
 
 # Iteration intervals for showing the loss during training, on command line interface
+#TODO change times
 __C.TRAIN.DISPLAY = 10
 
 # Whether to double the learning rate for bias
@@ -60,10 +61,14 @@ __C.TRAIN.SUMMARY_INTERVAL = 180
 
 # Scale to use during training (can list multiple scales)
 # The scale is the pixel size of an image's shortest side
-__C.TRAIN.SCALES = (600,)
+# TODO: change scale
+#__C.TRAIN.SCALES = (600,)
+__C.TRAIN.SCALES = (400,)
 
 # Max pixel size of the longest side of a scaled input image
-__C.TRAIN.MAX_SIZE = 1000
+# TODO: change scale
+#__C.TRAIN.MAX_SIZE = 1000
+__C.TRAIN.MAX_SIZE = 600
 
 # Images to use per minibatch
 __C.TRAIN.IMS_PER_BATCH = 1
@@ -83,7 +88,9 @@ __C.TRAIN.BG_THRESH_HI = 0.5
 __C.TRAIN.BG_THRESH_LO = 0.1
 
 # Use horizontally-flipped images during training?
-__C.TRAIN.USE_FLIPPED = True
+#TODO True
+#__C.TRAIN.USE_FLIPPED = True
+__C.TRAIN.USE_FLIPPED = False 
 
 # Train bounding-box regressors
 __C.TRAIN.BBOX_REG = True
@@ -93,7 +100,8 @@ __C.TRAIN.BBOX_REG = True
 __C.TRAIN.BBOX_THRESH = 0.5
 
 # Iterations between snapshots
-__C.TRAIN.SNAPSHOT_ITERS = 5000
+#TODO change snapshot 
+__C.TRAIN.SNAPSHOT_ITERS = 3000
 
 # solver.prototxt specifies the snapshot path prefix, this adds an optional
 # infix to yield the path: <prefix>[_<infix>]_iters_XYZ.caffemodel
@@ -159,6 +167,16 @@ __C.TRAIN.RPN_POSITIVE_WEIGHT = -1.0
 # For COCO, setting USE_ALL_GT to False will exclude boxes that are flagged as ''iscrowd''
 __C.TRAIN.USE_ALL_GT = True
 
+### Mask parameter
+# Least intersection of a positive mask
+__C.TRAIN.mask_threshold = 0.50
+
+# Number of rois that should be sampled to train this network
+__C.TRAIN.masks_per_image = 64
+
+# Only regions which intersection is larger than fg_threshold are considered to be fg
+__C.TRAIN.fg_threshold = 0.7
+
 #
 # Testing options
 #
@@ -166,10 +184,14 @@ __C.TEST = edict()
 
 # Scale to use during testing (can NOT list multiple scales)
 # The scale is the pixel size of an image's shortest side
-__C.TEST.SCALES = (600,)
+#__C.TEST.SCALES = (600,)
+#TODO: change size
+__C.TEST.SCALES = (400,)
 
 # Max pixel size of the longest side of a scaled input image
-__C.TEST.MAX_SIZE = 1000
+#__C.TEST.MAX_SIZE = 1000
+#TODO: change size
+__C.TEST.MAX_SIZE = 600
 
 # Overlap threshold used for non-maximum suppression (suppress boxes with
 # IoU >= this threshold)

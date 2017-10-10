@@ -33,6 +33,7 @@ class imdb(object):
     self._roidb_handler = self.default_roidb
     # Use this dict for storing dataset specific config options
     self.config = {}
+    self._roidb_index = 0
 
   @property
   def name(self):
@@ -66,6 +67,9 @@ class imdb(object):
   def roidb(self):
     # A roidb is a list of dictionaries, each with the following keys:
     #   boxes
+    # Mask
+    #   masks
+    # Mask
     #   gt_overlaps
     #   gt_classes
     #   flipped
@@ -73,6 +77,16 @@ class imdb(object):
       return self._roidb
     self._roidb = self.roidb_handler()
     return self._roidb
+
+  def roidb_index(self):
+    return self._roidb_index
+
+  def set_roidb_index(self, roidb_index):
+    self._roidb_index = roidb_index
+
+  def next_roidb_index(self):
+    self._roidb_index = self._roidb_index + 1
+    return self._roidb_index
 
   @property
   def cache_path(self):

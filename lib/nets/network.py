@@ -19,6 +19,7 @@ from layer_utils.proposal_layer import proposal_layer
 from layer_utils.proposal_top_layer import proposal_top_layer
 from layer_utils.anchor_target_layer import anchor_target_layer
 from layer_utils.proposal_target_layer import proposal_target_layer
+from layer_utils.mask import encode
 from utils.visualization import draw_bounding_boxes
 
 from model.config import cfg
@@ -29,6 +30,7 @@ class Network(object):
     self._losses = {}
     self._anchor_targets = {}
     self._proposal_targets = {}
+    self._mask_encodes= {}
     self._layers = {}
     self._gt_image = None
     self._act_summaries = []
@@ -85,6 +87,18 @@ class Network(object):
       return tf.reshape(reshaped_score, input_shape)
     return tf.nn.softmax(bottom, name=name)
 
+  def _filter_negative_samples(self, labels, tensors):
+    keeps = tf.where(tf.greater_equal(labels, 0))
+    keeps = tf.reshape(keeps, [-1])
+
+    filtered = []
+    for t in tensors:
+      #tf.assert_equal(tf.shape(t)[0], tf.shape(labels)[0])
+      f = tf.gather(t, keeps)
+      filtered.append(f)
+
+    return filtered
+
   def _proposal_top_layer(self, rpn_cls_prob, rpn_bbox_pred, name):
     with tf.variable_scope(name) as scope:
       rois, rpn_scores = tf.py_func(proposal_top_layer,
@@ -131,7 +145,7 @@ class Network(object):
       pre_pool_size = cfg.POOLING_SIZE * 2
       crops = tf.image.crop_and_resize(bottom, bboxes, tf.to_int32(batch_ids), [pre_pool_size, pre_pool_size], name="crops")
 
-    return slim.max_pool2d(crops, [2, 2], padding='SAME')
+    return crops
 
   def _dropout_layer(self, bottom, name, ratio=0.5):
     return tf.nn.dropout(bottom, ratio, name=name)
@@ -184,6 +198,26 @@ class Network(object):
 
       return rois, roi_scores
 
+  def mask_encode_layer(self, gt_masks, gt_boxes, rois, num_classes, mask_height, mask_width, scope='mask'):
+    with tf.variable_scope(scope) as scope:
+      labels, mask_targets, mask_inside_weights = \
+                   tf.py_func(encode,
+                   [gt_masks, gt_boxes, rois, num_classes, mask_height, mask_width, self._im_info[0], self._im_info[1]],
+                   [tf.float32, tf.int32, tf.float32],
+                   name="mask_encode")
+      labels = tf.convert_to_tensor(tf.cast(labels, tf.int32), name='classes')
+      mask_targets = tf.convert_to_tensor(mask_targets, name='mask_targets')
+      mask_inside_weights = tf.convert_to_tensor(mask_inside_weights, name='mask_inside_weights')
+      labels = tf.reshape(labels, (-1,))
+      mask_targets = tf.reshape(mask_targets, (-1, mask_height, mask_width, num_classes))
+      mask_inside_weights = tf.reshape(mask_inside_weights, (-1, mask_height, mask_width, num_classes))
+
+      self._mask_encodes['labels'] = labels
+      self._mask_encodes['mask_targets'] = mask_targets
+      self._mask_encodes['mask_inside_weights'] = mask_inside_weights
+
+      self._score_summaries.update(self._mask_encodes)
+
   def _anchor_component(self):
     with tf.variable_scope('ANCHOR_' + self._tag) as scope:
       # just to get the shape right
@@ -206,16 +240,21 @@ class Network(object):
     else:
       initializer = tf.random_normal_initializer(mean=0.0, stddev=0.01)
       initializer_bbox = tf.random_normal_initializer(mean=0.0, stddev=0.001)
-
+    #with tf.device("/cpu:0"):
     net_conv = self._image_to_head(is_training)
+    
     with tf.variable_scope(self._scope, self._scope):
       # build the anchors for the image
       self._anchor_component()
       # region proposal network
-      rois = self._region_proposal(net_conv, is_training, initializer)
+      # TODO: add mask layer
+      rois = self._region_proposal(net_conv, is_training, initializer) 
+      # TODO: resize the mask
+      self.mask_encode_layer(self._gt_masks, self._gt_boxes, rois, self._num_classes, 28, 28, scope='mask')
       # region of interest pooling
       if cfg.POOLING_MODE == 'crop':
-        pool5 = self._crop_pool_layer(net_conv, rois, "pool5")
+        cropped_rois = self._crop_pool_layer(net_conv, rois, "pool5")
+	pool5 = slim.max_pool2d(cropped_rois, [2,2], padding='SAME')
       else:
         raise NotImplementedError
 
@@ -224,6 +263,13 @@ class Network(object):
       # region classification
       cls_prob, bbox_pred = self._region_classification(fc7, is_training, 
                                                         initializer, initializer_bbox)
+    # build mask head
+    # TODO: generate predicted mask 
+    mask = cropped_rois
+    mask = slim.repeat(mask, 4, slim.conv2d, 256, [3,3], trainable= is_training, scope='mask_conv')
+    mask = slim.conv2d_transpose(mask, 256, 2, trainable=is_training, stride=2, padding='VALID')
+    mask = slim.conv2d(mask, self._num_classes, [1,1], trainable=is_training, padding='VALID', activation_fn=None)
+    self._predictions['mask'] = mask
 
     self._score_summaries.update(self._predictions)
 
@@ -275,12 +321,31 @@ class Network(object):
       bbox_outside_weights = self._proposal_targets['bbox_outside_weights']
       loss_box = self._smooth_l1_loss(bbox_pred, bbox_targets, bbox_inside_weights, bbox_outside_weights)
 
+      # mask loss
+      #TODO: generate mask loss 
+      masks = self._predictions['mask']
+      labels = self._mask_encodes['labels']
+      mask_targets = self._mask_encodes['mask_targets']
+      mask_inside_weights = self._mask_encodes['mask_inside_weights']
+
+      labels, masks, mask_targets, mask_inside_weights = \
+             self._filter_negative_samples(tf.reshape(labels, [-1]), 
+               [tf.reshape(labels, [-1]), masks, mask_targets, mask_inside_weights])
+
+      mask_targets = tf.cast(mask_targets, tf.float32)
+      mask_loss = 1.0 * tf.nn.sigmoid_cross_entropy_with_logits(labels= mask_targets, logits=masks)
+      mask_loss = tf.reduce_mean(mask_loss)
+      mask_loss = tf.cond(tf.greater(tf.size(labels), 0), lambda:mask_loss, lambda:tf.constant(0.0))
+
+      #TODO: add mask_loss to _losses
       self._losses['cross_entropy'] = cross_entropy
       self._losses['loss_box'] = loss_box
       self._losses['rpn_cross_entropy'] = rpn_cross_entropy
       self._losses['rpn_loss_box'] = rpn_loss_box
+      self._losses['mask_loss'] = mask_loss
 
-      loss = cross_entropy + loss_box + rpn_cross_entropy + rpn_loss_box
+      #TODO: add mask_loss to loss
+      loss = cross_entropy + loss_box + rpn_cross_entropy + rpn_loss_box + mask_loss
       self._losses['total_loss'] = loss
 
       self._event_summaries.update(self._losses)
@@ -288,7 +353,7 @@ class Network(object):
     return loss
 
   def _region_proposal(self, net_conv, is_training, initializer):
-    rpn = slim.conv2d(net_conv, cfg.RPN_CHANNELS, [3, 3], trainable=is_training, weights_initializer=initializer,
+    rpn = slim.conv2d(net_conv, cfg.RPN_CHANNELS, [3, 3], trainable=False, weights_initializer=initializer,
                         scope="rpn_conv/3x3")
     self._act_summaries.append(rpn)
     rpn_cls_score = slim.conv2d(rpn, self._num_anchors * 2, [1, 1], trainable=is_training,
@@ -299,7 +364,7 @@ class Network(object):
     rpn_cls_prob_reshape = self._softmax_layer(rpn_cls_score_reshape, "rpn_cls_prob_reshape")
     rpn_cls_pred = tf.argmax(tf.reshape(rpn_cls_score_reshape, [-1, 2]), axis=1, name="rpn_cls_pred")
     rpn_cls_prob = self._reshape_layer(rpn_cls_prob_reshape, self._num_anchors * 2, "rpn_cls_prob")
-    rpn_bbox_pred = slim.conv2d(rpn, self._num_anchors * 4, [1, 1], trainable=is_training,
+    rpn_bbox_pred = slim.conv2d(rpn, self._num_anchors * 4, [1, 1], trainable=False,
                                 weights_initializer=initializer,
                                 padding='VALID', activation_fn=None, scope='rpn_bbox_pred')
     if is_training:
@@ -334,7 +399,7 @@ class Network(object):
     cls_pred = tf.argmax(cls_score, axis=1, name="cls_pred")
     bbox_pred = slim.fully_connected(fc7, self._num_classes * 4, 
                                      weights_initializer=initializer_bbox,
-                                     trainable=is_training,
+                                     trainable=False,
                                      activation_fn=None, scope='bbox_pred')
 
     self._predictions["cls_score"] = cls_score
@@ -355,6 +420,9 @@ class Network(object):
     self._image = tf.placeholder(tf.float32, shape=[1, None, None, 3])
     self._im_info = tf.placeholder(tf.float32, shape=[3])
     self._gt_boxes = tf.placeholder(tf.float32, shape=[None, 5])
+    # Mask
+    self._gt_masks = tf.placeholder(tf.int32, shape=[None, None, None])
+    # Mask
     self._tag = tag
 
     self._num_classes = num_classes
@@ -365,6 +433,10 @@ class Network(object):
     self._anchor_ratios = anchor_ratios
     self._num_ratios = len(anchor_ratios)
 
+    print('num_scales:')
+    print(self._num_scales)
+    print('num_ratios:')
+    print(self._num_ratios)
     self._num_anchors = self._num_scales * self._num_ratios
 
     training = mode == 'TRAIN'
@@ -415,7 +487,7 @@ class Network(object):
 
       self._summary_op = tf.summary.merge_all()
       self._summary_op_val = tf.summary.merge(val_summaries)
-
+    
     layers_to_output.update(self._predictions)
 
     return layers_to_output
@@ -438,47 +510,50 @@ class Network(object):
     feed_dict = {self._image: image,
                  self._im_info: im_info}
 
-    cls_score, cls_prob, bbox_pred, rois = sess.run([self._predictions["cls_score"],
-                                                     self._predictions['cls_prob'],
-                                                     self._predictions['bbox_pred'],
-                                                     self._predictions['rois']],
-                                                    feed_dict=feed_dict)
-    return cls_score, cls_prob, bbox_pred, rois
+    cls_score, cls_prob, bbox_pred, rois, mask = sess.run([self._predictions["cls_score"],
+                                                           self._predictions['cls_prob'],
+                                                           self._predictions['bbox_pred'],
+                                                           self._predictions['rois'],
+                                                           self._predictions['mask']],
+                                                           feed_dict=feed_dict)
+    return cls_score, cls_prob, bbox_pred, rois, mask
 
   def get_summary(self, sess, blobs):
     feed_dict = {self._image: blobs['data'], self._im_info: blobs['im_info'],
-                 self._gt_boxes: blobs['gt_boxes']}
+                 self._gt_boxes: blobs['gt_boxes'], self._gt_masks: blobs['gt_masks']}
     summary = sess.run(self._summary_op_val, feed_dict=feed_dict)
 
     return summary
 
   def train_step(self, sess, blobs, train_op):
     feed_dict = {self._image: blobs['data'], self._im_info: blobs['im_info'],
-                 self._gt_boxes: blobs['gt_boxes']}
-    rpn_loss_cls, rpn_loss_box, loss_cls, loss_box, loss, _ = sess.run([self._losses["rpn_cross_entropy"],
+                 self._gt_boxes: blobs['gt_boxes'], self._gt_masks: blobs['gt_masks']}
+    rpn_loss_cls, rpn_loss_box, loss_cls, loss_box, mask_loss, loss, _ = sess.run([self._losses["rpn_cross_entropy"],
                                                                         self._losses['rpn_loss_box'],
                                                                         self._losses['cross_entropy'],
                                                                         self._losses['loss_box'],
+                                                                        self._losses['mask_loss'],
                                                                         self._losses['total_loss'],
                                                                         train_op],
                                                                        feed_dict=feed_dict)
-    return rpn_loss_cls, rpn_loss_box, loss_cls, loss_box, loss
+    return rpn_loss_cls, rpn_loss_box, loss_cls, loss_box, mask_loss, loss
 
   def train_step_with_summary(self, sess, blobs, train_op):
     feed_dict = {self._image: blobs['data'], self._im_info: blobs['im_info'],
-                 self._gt_boxes: blobs['gt_boxes']}
-    rpn_loss_cls, rpn_loss_box, loss_cls, loss_box, loss, summary, _ = sess.run([self._losses["rpn_cross_entropy"],
+                 self._gt_boxes: blobs['gt_boxes'], self._gt_masks: blobs['gt_masks']}
+    rpn_loss_cls, rpn_loss_box, loss_cls, loss_box, mask_loss, loss, summary, _ = sess.run([self._losses["rpn_cross_entropy"],
                                                                                  self._losses['rpn_loss_box'],
                                                                                  self._losses['cross_entropy'],
                                                                                  self._losses['loss_box'],
+                                                                                 self._losses['mask_loss'],
                                                                                  self._losses['total_loss'],
                                                                                  self._summary_op,
                                                                                  train_op],
                                                                                 feed_dict=feed_dict)
-    return rpn_loss_cls, rpn_loss_box, loss_cls, loss_box, loss, summary
+    return rpn_loss_cls, rpn_loss_box, loss_cls, loss_box, mask_loss, loss, summary
 
   def train_step_no_return(self, sess, blobs, train_op):
     feed_dict = {self._image: blobs['data'], self._im_info: blobs['im_info'],
-                 self._gt_boxes: blobs['gt_boxes']}
+                 self._gt_boxes: blobs['gt_boxes'], self._gt_masks: blobs['gt_masks']}
     sess.run([train_op], feed_dict=feed_dict)
 

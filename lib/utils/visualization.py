@@ -46,7 +46,7 @@ try:
 except IOError:
   FONT = ImageFont.load_default()
 
-def _draw_single_box(image, xmin, ymin, xmax, ymax, display_str, font, color='black', thickness=4):
+def _draw_single_box(image, xmin, ymin, xmax, ymax, display_str, font, color='yellow', thickness=10):
   draw = ImageDraw.Draw(image)
   (left, right, top, bottom) = (xmin, xmax, ymin, ymax)
   draw.line([(left, top), (left, bottom), (right, bottom),
